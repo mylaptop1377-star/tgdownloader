@@ -1,5 +1,6 @@
 import os
 import sys
+import asyncio
 
 if sys.platform == "win32":
     try:
@@ -307,14 +308,13 @@ async def main():
     # bgutil PO Token serverini ishga tushirish
     import subprocess as _sp
     import shutil as _sh
-    import os as _os
     _node = _sh.which("node")
-    _bgutil_script = _os.path.expanduser(r"~\bgutil-ytdlp-pot-provider\server\build\main.js")
-    if _node and _os.path.exists(_bgutil_script):
+    _bgutil_script = os.path.expanduser(r"~\bgutil-ytdlp-pot-provider\server\build\main.js")
+    if _node and os.path.exists(_bgutil_script):
         try:
             _sp.Popen([_node, _bgutil_script],
                       stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
-                      creationflags=_sp.CREATE_NO_WINDOW if _os.name == 'nt' else 0)
+                      creationflags=_sp.CREATE_NO_WINDOW if os.name == 'nt' else 0)
             await asyncio.sleep(2)
             print("bgutil PO Token server ishga tushdi (port 4416)")
         except Exception as e:
@@ -322,6 +322,7 @@ async def main():
 
     # Render uchun kichik veb-server (Port scan timeout bermasligi uchun)
     from aiohttp import web
+    
     async def handle_ping(request):
         return web.Response(text="Bot is running!")
 
@@ -329,7 +330,7 @@ async def main():
     app.router.add_get("/", handle_ping)
     app.router.add_get("/health", handle_ping)
     
-    port = int(_os.getenv("PORT", 8080))
+    port = int(os.getenv("PORT", "8080"))
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)
@@ -337,13 +338,17 @@ async def main():
     print(f"Render healthcheck port {port} da ishga tushdi")
 
     bot = Bot(token=BOT_TOKEN)
-    cookie_status = " + Cookie fayli mavjud" if downloader._get_cookie_path() else " (Cookie fayli topilmadi)"
+    cookie_path = downloader._get_cookie_path()
+    cookie_status = (
+        " + Cookie fayli mavjud"
+        if cookie_path
+        else " (Cookie fayli topilmadi)"
+    )
     print(f"Bot ulandi: @arobiy_downloader_bot{cookie_status}")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    import asyncio
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
