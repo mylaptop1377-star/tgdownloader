@@ -320,8 +320,24 @@ async def main():
         except Exception as e:
             logger.warning(f"bgutil server ishga tushirilmadi: {e}")
 
+    # Render uchun kichik veb-server (Port scan timeout bermasligi uchun)
+    from aiohttp import web
+    async def handle_ping(request):
+        return web.Response(text="Bot is running!")
+
+    app = web.Application()
+    app.router.add_get("/", handle_ping)
+    app.router.add_get("/health", handle_ping)
+    
+    port = int(_os.getenv("PORT", 8080))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"Render healthcheck port {port} da ishga tushdi")
+
     bot = Bot(token=BOT_TOKEN)
-    cookie_status = " + Cookie fayli mavjud" if downloader.COOKIES_FILE.exists() else " (Cookie fayli topilmadi)"
+    cookie_status = " + Cookie fayli mavjud" if downloader._get_cookie_path() else " (Cookie fayli topilmadi)"
     print(f"Bot ulandi: @arobiy_downloader_bot{cookie_status}")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
