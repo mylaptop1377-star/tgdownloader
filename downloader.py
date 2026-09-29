@@ -58,38 +58,30 @@ def get_base_ydl_opts() -> dict:
     }
 
 COOKIES_FILE = Path(__file__).parent / "youtube_cookies.txt"
-BGUTIL_URL = "http://127.0.0.1:4416"
+RENDER_SECRETS_COOKIE = Path("/etc/secrets/youtube_cookies.txt")
 
-def _bgutil_server_running() -> bool:
-    """bgutil PO Token server ishlab turganligini tekshiradi."""
-    try:
-        import urllib.request
-        urllib.request.urlopen(BGUTIL_URL, timeout=1)
-    except Exception as e:
-        # 403/connection refused va boshqalar - serverni mavjudligini aniqlash uchun
-        err = str(e)
-        return "Not meant to be accessed" in err or "403" in err or "400" in err
-    return False
+def _get_cookie_path() -> Optional[str]:
+    """Render secret file yoki lokal papkadagi cookie faylini topadi."""
+    if RENDER_SECRETS_COOKIE.exists():
+        return str(RENDER_SECRETS_COOKIE)
+    if COOKIES_FILE.exists():
+        return str(COOKIES_FILE)
+    return None
 
 def _get_yt_base_opts_with_cookies() -> dict:
-    """Cookie fayli va bgutil PO Token server mavjud bo'lsa ularni qo'shadi."""
-    extractor_args: dict = {
-        'youtube': {
-            'player_client': ['android', 'web'],
+    """Cookie fayli bilan barqaror YouTube yuklash sozlamalari."""
+    opts: dict = {}
+    
+    cookie_path = _get_cookie_path()
+    if cookie_path:
+        opts['cookiefile'] = cookie_path
+    else:
+        # Cookie bo'lmaganda android klientidan foydalanish
+        opts['extractor_args'] = {
+            'youtube': {
+                'player_client': ['android', 'web'],
+            }
         }
-    }
-
-    # bgutil PO Token HTTP server ishlab tursa qo'shamiz
-    if _bgutil_server_running():
-        extractor_args['youtubepot-bgutilhttp'] = {
-            'base_url': [BGUTIL_URL],
-        }
-
-    opts: dict = {'extractor_args': extractor_args}
-
-    # Cookie fayli mavjud bo'lsa qo'shamiz
-    if COOKIES_FILE.exists():
-        opts['cookiefile'] = str(COOKIES_FILE)
 
     return opts
 
@@ -263,7 +255,9 @@ def _download_youtube_video_sync(url: str, height: int) -> dict:
     format_selector = (
         f"bestvideo[height<={height}][vcodec^=avc]+bestaudio[acodec^=mp4a]/"
         f"bestvideo[height<={height}]+bestaudio/"
-        f"best[height<={height}]/best"
+        f"best[height<={height}]/"
+        f"bestvideo+bestaudio/"
+        f"best"
     )
 
     base = get_base_ydl_opts()
