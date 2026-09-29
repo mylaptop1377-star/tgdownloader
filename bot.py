@@ -36,7 +36,6 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 dp = Dispatcher()
 
 # YouTube so'rovlari uchun vaqtinchalik xotira kesh
-# video_id -> {'url': url, 'title': title}
 yt_cache: Dict[str, dict] = {}
 
 URL_REGEX = re.compile(r'https?://[^\s]+')
@@ -49,7 +48,7 @@ async def cmd_start(message: types.Message):
         "📥 **Qanday ishlatiladi?**\n"
         "Menga shunchaki video havolasini (linkini) yuboring:\n"
         "• 🔴 **YouTube** — Video sifatini tanlash (1080p, 720p, 480p, 360p) va **MP3 audio** ajratib olish imkoniyati bilan.\n"
-        "• 🟣 **Instagram** — Reels, post va videolar.\n"
+        "• 🟣 **Instagram** — Reels, post, carousel va barcha media turlar.\n"
         "• 🔵 **Facebook** — Turli formatdagi videolar.\n\n"
         "Sinab ko'rish uchun hoziroq havola yuboring!"
     )
@@ -149,29 +148,64 @@ async def handle_incoming_link(message: types.Message):
             await status_msg.edit_text(f"❌ Videoni o'qib bo'lmadi yoki havola noto'g'ri.\nXatolik: {str(e)[:100]}")
 
     elif platform == "instagram":
-        status_msg = await message.reply("⏳ Instagram videosi yuklanmoqda, iltimos kuting...")
+        status_msg = await message.reply("⏳ Instagram mediasi yuklanmoqda, iltimos kuting...")
         try:
-            data = await downloader.download_instagram(url)
-            file_path = data['file_path']
+            result = await downloader.download_instagram(url)
+            media_list = result.get('files', [])
+            work_dir = result.get('work_dir')
 
-            if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
-                await status_msg.edit_text("❌ Instagram videoni yuklab bo'lmadi (akkaunt yopiq yoki video topilmadi).")
+            if not media_list:
+                await status_msg.edit_text("❌ Instagram dan media topilmadi.")
                 return
 
-            await status_msg.edit_text("📤 Telegramga yuborilmoqda...")
-            video_file = types.FSInputFile(file_path)
-            await message.reply_video(
-                video=video_file,
-                caption="🟣 **Instagram dan yuklab olindi**\n@Bot orqali yuklandi",
-                parse_mode="Markdown"
-            )
+            await status_msg.edit_text(f"📤 {len(media_list)} ta media Telegramga yuborilmoqda...")
+
+            for item in media_list:
+                file_path = item['file_path']
+                media_type = item['type']
+                title = item['title']
+                
+                try:
+                    if media_type == 'video':
+                        caption = f"🟣 **Instagram Video**\n{title}"
+                        if result.get('is_carousel'):
+                            caption += f"\n📸 {item['index']}/{item['total']}"
+                        
+                        await message.reply_video(
+                            video=types.FSInputFile(file_path),
+                            caption=caption,
+                            parse_mode="Markdown"
+                        )
+                    else:
+                        caption = f"🟣 **Instagram Post**\n{title}"
+                        if result.get('is_carousel'):
+                            caption += f"\n📸 {item['index']}/{item['total']}"
+                        
+                        await message.reply_photo(
+                            photo=types.FSInputFile(file_path),
+                            caption=caption,
+                            parse_mode="Markdown"
+                        )
+                    
+                    # Faylni o'chirish
+                    downloader.cleanup_file(file_path)
+                    await asyncio.sleep(0.5)  # Rate limiting
+                    
+                except TelegramEntityTooLarge:
+                    await message.reply(f"⚠️ {title} - fayl juda katta (50 MB dan oshdi)")
+                except Exception as e:
+                    logger.error(f"Media jo'natishda xatolik: {e}")
+                    await message.reply(f"❌ {title} - jo'natishda xatolik")
+
+            # Qo'lni o'chirish
+            if work_dir:
+                downloader.cleanup_directory(work_dir)
+
             await status_msg.delete()
-            downloader.cleanup_file(file_path)
-        except TelegramEntityTooLarge:
-            await status_msg.edit_text("⚠️ Video hajmi 50 MB dan katta bo'lgani sababli Telegram orqali yuborib bo'lmadi.")
+
         except Exception as e:
             logger.error(f"Instagram yuklashda xatolik: {e}")
-            await status_msg.edit_text(f"❌ Yuklab olishda xatolik yuz berdi: {str(e)[:100]}")
+            await status_msg.edit_text(f"❌ Instagram yuklashda xatolik yuz berdi: {str(e)[:100]}")
 
     elif platform == "facebook":
         status_msg = await message.reply("⏳ Facebook videosi yuklanmoqda, iltimos kuting...")
@@ -180,14 +214,14 @@ async def handle_incoming_link(message: types.Message):
             file_path = data['file_path']
 
             if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
-                await status_msg.edit_text("❌ Facebook videoni yuklab bo'lmadi (video yopiq guruhda yoki o'chirilgan bo'lishi mumkin).")
+                await status_msg.edit_text("❌ Facebook videoni yuklab bo'lmadi (video yopiq yoki o'chirilgan).")
                 return
 
             await status_msg.edit_text("📤 Telegramga yuborilmoqda...")
             video_file = types.FSInputFile(file_path)
             await message.reply_video(
                 video=video_file,
-                caption="🔵 **Facebook dan yuklab olindi**\n@Bot orqali yuklandi",
+                caption="🔵 **Facebook dan yuklab olindi**",
                 parse_mode="Markdown"
             )
             await status_msg.delete()
@@ -262,7 +296,7 @@ async def handle_youtube_callback(callback: types.CallbackQuery):
             await status_msg.delete()
             downloader.cleanup_file(file_path)
         except TelegramEntityTooLarge:
-            await status_msg.edit_text("⚠️ Video hajmi 50 MB dan oshib ketdi. Telegram botlar faqat 50 MB gacha fayl yubora oladi. Kichikroq sifatni (masalan, 480p yoki 360p) tanlab ko'ring.")
+            await status_msg.edit_text("⚠️ Video hajmi 50 MB dan oshib ketdi. Kichikroq sifatni (masalan, 480p yoki 360p) tanlab ko'ring.")
         except Exception as e:
             logger.error(f"YouTube video yuklashda xatolik: {e}")
             await status_msg.edit_text(f"❌ Yuklashda xatolik yuz berdi: {str(e)[:120]}")

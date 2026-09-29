@@ -5,6 +5,7 @@ import asyncio
 import uuid
 import logging
 import subprocess
+import shutil
 from pathlib import Path
 from typing import Dict, Tuple, Optional, List
 import yt_dlp
@@ -26,7 +27,7 @@ MAX_TELEGRAM_BYTES = int(49.5 * 1024 * 1024)
 
 def sanitize_filename(name: str) -> str:
     """Fayl nomidagi taqiqlangan belgilarni olib tashlaydi."""
-    return re.sub(r'[\\/*?:"<>|]', "", name).strip()
+    return re.sub(r'[\\/*?:"<>|]', "", name).strip()[:120]
 
 def detect_platform(url: str) -> str:
     """Havola qaysi platformaga tegishli ekanligini aniqlaydi."""
@@ -40,9 +41,7 @@ def detect_platform(url: str) -> str:
     return "unknown"
 
 def get_base_ydl_opts() -> dict:
-    """Tezkor yuklash uchun asosiy yt-dlp sozlamalari.
-    android va tv_embedded klientlari YouTube bot tekshiruvini chetlab o'tadi.
-    """
+    """Tezkor yuklash uchun asosiy yt-dlp sozlamalari."""
     return {
         'quiet': True,
         'no_warnings': True,
@@ -76,7 +75,6 @@ def _get_yt_base_opts_with_cookies() -> dict:
     if cookie_path:
         opts['cookiefile'] = cookie_path
     else:
-        # Cookie bo'lmaganda android klientidan foydalanish
         opts['extractor_args'] = {
             'youtube': {
                 'player_client': ['android', 'web'],
@@ -185,11 +183,8 @@ def get_video_duration_ffmpeg(file_path: str) -> float:
         return 0.0
 
 def compress_video_if_needed(file_path: str, duration: int = 0) -> Tuple[str, bool]:
-    """
-    Agar video hajmi 49.5 MB dan katta bo'lsa, uni FFmpeg orqali avtomatik siqib,
-    Telegram Bot API limitiga (50 MB dan kichik) moslashtiradi.
-    Qaytaradi: (yakuniy_fayl_yo'li, siqilganmi_boolean)
-    """
+    """Agar video hajmi 49.5 MB dan katta bo'lsa, uni FFmpeg orqali avtomatik siqib,
+    Telegram Bot API limitiga (50 MB dan kichik) moslashtiradi."""
     if not os.path.exists(file_path):
         return file_path, False
 
@@ -202,15 +197,12 @@ def compress_video_if_needed(file_path: str, duration: int = 0) -> Tuple[str, bo
     if duration <= 0:
         duration = int(get_video_duration_ffmpeg(file_path))
 
-    # Agar video 25 daqiqadan kam bo'lsa, maqsadli bitrate hisoblash
-    # 47 MB = 47 * 8 * 1024 * 1024 bit
     if 0 < duration <= 1500:
         target_total_bits = 47.0 * 8 * 1024 * 1024
         target_total_bitrate = int(target_total_bits / duration)
-        audio_bitrate = 96000 # 96k
+        audio_bitrate = 96000
         video_bitrate = max(180000, target_total_bitrate - audio_bitrate)
     else:
-        # Standart parametrlar
         video_bitrate = 450000
         audio_bitrate = 96000
 
@@ -236,7 +228,6 @@ def compress_video_if_needed(file_path: str, duration: int = 0) -> Tuple[str, bo
         if os.path.exists(compressed_path) and os.path.getsize(compressed_path) > 0:
             new_size = os.path.getsize(compressed_path)
             logger.info(f"Siqish yakunlandi: {new_size / (1024*1024):.1f} MB")
-            # Asl katta faylni o'chiramiz
             try:
                 os.remove(file_path)
             except Exception:
@@ -329,82 +320,78 @@ async def download_youtube_audio(url: str) -> dict:
     return await asyncio.to_thread(_download_youtube_audio_sync, url)
 
 def _download_instagram_sync(url: str) -> dict:
-    """Instagram (post, reel, karusel) yuklab olish - barcha tiplarni qo'llaydi."""
-    file_id = str(uuid.uuid4())[:8]
-    output_template = str(DOWNLOAD_DIR / f"insta_{file_id}")
+    """Instagram (reel, post, carousel, video) - barcha turlarni download qiladi."""
+    work_dir = DOWNLOAD_DIR / f"insta_{uuid.uuid4().hex[:8]}"
+    work_dir.mkdir(exist_ok=True, parents=True)
 
     ydl_opts = get_base_ydl_opts()
     ydl_opts.update({
-        'format': 'best',
-        'outtmpl': output_template + '/%(title)s.%(ext)s',
         'quiet': False,
         'no_warnings': False,
+        'format': 'best',
+        'outtmpl': str(work_dir / '%(title)s.%(ext)s'),
         'merge_output_format': 'mp4',
-        'postprocessors': [],
+        'noplaylist': False,
+        'extract_flat': False,
     })
 
-    files_info = []
-    
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        try:
-            info = ydl.extract_info(url, download=True)
-            
-            # Agar karusel yoki bir nechta entry bo'lsa
-            if 'entries' in info:
-                entries = info['entries']
-            else:
-                entries = [info]
-            
-            for idx, entry in enumerate(entries):
-                try:
-                    filename = ydl.prepare_filename(entry)
-                    base_name, ext = os.path.splitext(filename)
-                    
-                    # MP4 ni qidirish (video hammasi)
-                    expected_mp4 = f"{base_name}.mp4"
-                    if os.path.exists(expected_mp4):
-                        file_path = expected_mp4
-                    else:
-                        file_path = filename
-                    
-                    if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
-                        duration = entry.get('duration', 0)
-                        file_path, compressed = compress_video_if_needed(file_path, duration)
-                        file_size = os.path.getsize(file_path)
-                        
-                        files_info.append({
-                            'file_path': file_path,
-                            'title': entry.get('title', f'Instagram {idx+1}'),
-                            'duration': duration,
-                            'size': file_size,
-                            'compressed': compressed,
-                            'index': idx + 1,
-                            'total': len(entries)
-                        })
-                except Exception as e:
-                    logger.error(f"Instagram entry {idx} yuklashda xatolik: {e}")
-                    continue
-        
-        except Exception as e:
-            logger.error(f"Instagram yuklashda xatolik: {e}")
-            raise
-    
-    if not files_info:
-        raise Exception("Instagram dan fayl yuklash mumkin bo'lmadi")
-    
+    media_items = []
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info_dict = ydl.extract_info(url, download=True)
+
+        # Entries (carousel) yoki single video
+        entries = info_dict.get('entries', [info_dict]) if isinstance(info_dict, dict) else [info_dict]
+
+        for idx, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                continue
+
+            title = sanitize_filename(entry.get('title', f'instagram_{idx+1}'))
+            is_video = entry.get('ext') in ['mp4', 'mkv', 'mov', 'avi']
+
+            # Faylni papkada topish
+            found_file = None
+            for file_path in work_dir.rglob('*'):
+                if file_path.is_file() and not file_path.name.startswith('.'):
+                    found_file = str(file_path)
+                    break
+
+            if found_file:
+                duration = entry.get('duration', 0)
+                if is_video:
+                    found_file, _ = compress_video_if_needed(found_file, duration)
+
+                media_items.append({
+                    'type': 'video' if is_video else 'photo',
+                    'file_path': found_file,
+                    'title': title,
+                    'index': idx + 1,
+                    'total': len(entries)
+                })
+
+    except Exception as e:
+        logger.error(f"Instagram download xatolik: {e}")
+        # Hattoki xato bo'lsa, topilgan fayllarni qaytarish
+
+    if not media_items:
+        raise Exception("Instagram dan fayl topilmadi")
+
     return {
-        'files': files_info,
-        'total_files': len(files_info),
-        'is_carousel': len(files_info) > 1
+        'files': media_items,
+        'total': len(media_items),
+        'is_carousel': len(media_items) > 1,
+        'work_dir': str(work_dir)
     }
 
 async def download_instagram(url: str) -> dict:
     return await asyncio.to_thread(_download_instagram_sync, url)
 
-def _download_direct_media_sync(url: str, prefix: str = "media") -> dict:
-    """Facebook va boshqa videolarini tezkor yuklaydi."""
+def _download_facebook_sync(url: str) -> dict:
+    """Facebook videosini yuklaydi."""
     file_id = str(uuid.uuid4())[:8]
-    output_template = str(DOWNLOAD_DIR / f"{prefix}_{file_id}.%(ext)s")
+    output_template = str(DOWNLOAD_DIR / f"fb_{file_id}.%(ext)s")
 
     ydl_opts = get_base_ydl_opts()
     ydl_opts.update({
@@ -436,7 +423,7 @@ def _download_direct_media_sync(url: str, prefix: str = "media") -> dict:
         }
 
 async def download_facebook(url: str) -> dict:
-    return await asyncio.to_thread(_download_direct_media_sync, url, "fb")
+    return await asyncio.to_thread(_download_facebook_sync, url)
 
 def cleanup_file(file_path: str):
     """Vaqtinchalik yuklangan faylni o'chiradi."""
@@ -451,7 +438,6 @@ def cleanup_directory(dir_path: str):
     """Vaqtinchalik yuklangan qo'lni o'chiradi."""
     try:
         if dir_path and os.path.isdir(dir_path):
-            import shutil
             shutil.rmtree(dir_path)
             logger.info(f"Qo'l o'chirildi: {dir_path}")
     except Exception as e:
