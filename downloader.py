@@ -6,7 +6,7 @@ import uuid
 import logging
 import subprocess
 from pathlib import Path
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, List
 import yt_dlp
 import static_ffmpeg
 
@@ -328,8 +328,81 @@ def _download_youtube_audio_sync(url: str) -> dict:
 async def download_youtube_audio(url: str) -> dict:
     return await asyncio.to_thread(_download_youtube_audio_sync, url)
 
+def _download_instagram_sync(url: str) -> dict:
+    """Instagram (post, reel, karusel) yuklab olish - barcha tiplarni qo'llaydi."""
+    file_id = str(uuid.uuid4())[:8]
+    output_template = str(DOWNLOAD_DIR / f"insta_{file_id}")
+
+    ydl_opts = get_base_ydl_opts()
+    ydl_opts.update({
+        'format': 'best',
+        'outtmpl': output_template + '/%(title)s.%(ext)s',
+        'quiet': False,
+        'no_warnings': False,
+        'merge_output_format': 'mp4',
+        'postprocessors': [],
+    })
+
+    files_info = []
+    
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        try:
+            info = ydl.extract_info(url, download=True)
+            
+            # Agar karusel yoki bir nechta entry bo'lsa
+            if 'entries' in info:
+                entries = info['entries']
+            else:
+                entries = [info]
+            
+            for idx, entry in enumerate(entries):
+                try:
+                    filename = ydl.prepare_filename(entry)
+                    base_name, ext = os.path.splitext(filename)
+                    
+                    # MP4 ni qidirish (video hammasi)
+                    expected_mp4 = f"{base_name}.mp4"
+                    if os.path.exists(expected_mp4):
+                        file_path = expected_mp4
+                    else:
+                        file_path = filename
+                    
+                    if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+                        duration = entry.get('duration', 0)
+                        file_path, compressed = compress_video_if_needed(file_path, duration)
+                        file_size = os.path.getsize(file_path)
+                        
+                        files_info.append({
+                            'file_path': file_path,
+                            'title': entry.get('title', f'Instagram {idx+1}'),
+                            'duration': duration,
+                            'size': file_size,
+                            'compressed': compressed,
+                            'index': idx + 1,
+                            'total': len(entries)
+                        })
+                except Exception as e:
+                    logger.error(f"Instagram entry {idx} yuklashda xatolik: {e}")
+                    continue
+        
+        except Exception as e:
+            logger.error(f"Instagram yuklashda xatolik: {e}")
+            raise
+    
+    if not files_info:
+        raise Exception("Instagram dan fayl yuklash mumkin bo'lmadi")
+    
+    return {
+        'files': files_info,
+        'total_files': len(files_info),
+        'is_carousel': len(files_info) > 1
+    }
+
+async def download_instagram(url: str) -> dict:
+    return await asyncio.to_thread(_download_instagram_sync, url)
+
 def _download_direct_media_sync(url: str, prefix: str = "media") -> dict:
-    """Instagram va Facebook videolarini tezkor yuklaydi."""
+    """Facebook va boshqa videolarini tezkor yuklaydi."""
     file_id = str(uuid.uuid4())[:8]
     output_template = str(DOWNLOAD_DIR / f"{prefix}_{file_id}.%(ext)s")
 
@@ -362,9 +435,6 @@ def _download_direct_media_sync(url: str, prefix: str = "media") -> dict:
             'compressed': compressed
         }
 
-async def download_instagram(url: str) -> dict:
-    return await asyncio.to_thread(_download_direct_media_sync, url, "insta")
-
 async def download_facebook(url: str) -> dict:
     return await asyncio.to_thread(_download_direct_media_sync, url, "fb")
 
@@ -376,3 +446,13 @@ def cleanup_file(file_path: str):
             logger.info(f"O'chirildi: {file_path}")
     except Exception as e:
         logger.error(f"Faylni o'chirishda xatolik: {e}")
+
+def cleanup_directory(dir_path: str):
+    """Vaqtinchalik yuklangan qo'lni o'chiradi."""
+    try:
+        if dir_path and os.path.isdir(dir_path):
+            import shutil
+            shutil.rmtree(dir_path)
+            logger.info(f"Qo'l o'chirildi: {dir_path}")
+    except Exception as e:
+        logger.error(f"Qo'lni o'chirishda xatolik: {e}")
